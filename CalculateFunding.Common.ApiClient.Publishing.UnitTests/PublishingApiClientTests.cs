@@ -1,0 +1,958 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Threading.Tasks;
+using CalculateFunding.Common.ApiClient.Jobs.Models;
+using CalculateFunding.Common.ApiClient.Models;
+using CalculateFunding.Common.ApiClient.Publishing.Models;
+using CalculateFunding.Common.ApiClient.Publishing.Models.Reprofiling;
+using CalculateFunding.Common.Extensions;
+using CalculateFunding.Common.Models.Search;
+using CalculateFunding.Common.Testing;
+using FluentAssertions;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using NSubstitute;
+using Serilog;
+// ReSharper disable HeapView.CanAvoidClosure
+
+namespace CalculateFunding.Common.ApiClient.Publishing.UnitTests
+{
+    [TestClass]
+    public class PublishingApiClientTests : ApiClientTestBase
+    {
+        private PublishingApiClient _client;
+
+        [TestInitialize]
+        public void SetUp()
+        {
+            _client = new PublishingApiClient(ClientFactory,
+                Substitute.For<ILogger>());
+        }
+
+        [TestMethod]
+        public async Task GetProfileHistory()
+        {
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+            string providerId = NewRandomString();
+
+            await AssertGetRequest($"fundingstreams/{fundingStreamId}/fundingperiods/{fundingPeriodId}/providers/{providerId}/profilinghistory",
+                Enumerable.Empty<ProfileTotal>(),
+                () => _client.GetProfileHistory(fundingStreamId, fundingPeriodId, providerId));
+        }
+
+        [TestMethod]
+        public async Task QueueReportJobs()
+        {
+            GeneratePublishingCsvJobsCreationAction createAction = GeneratePublishingCsvJobsCreationAction.Refresh;
+            string specificationId = NewRandomString();
+
+            await AssertGetRequest($"specifications/{createAction}/{specificationId}/queue-report-jobs",
+                new Job(),
+                () => _client.QueueReportJobs(createAction, specificationId));
+        }
+
+        [TestMethod]
+        public async Task QueueAllCsvJobs()
+        {
+            string specificationId = NewRandomString();
+
+            await AssertGetRequest($"specifications/{specificationId}/queue-all-csv-jobs",
+                new Job(),
+                () => _client.QueueAllCsvJobs(specificationId));
+        }
+
+        [TestMethod]
+        public async Task SavePaymentDates()
+        {
+            string csv = NewRandomString();
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+
+            HttpStatusCode expectedStatusCode = HttpStatusCode.OK;
+
+            GivenTheStatusCode($"fundingstreams/{fundingStreamId}/fundingperiods/{fundingPeriodId}/paymentdates",
+                expectedStatusCode, HttpMethod.Post);
+
+            HttpStatusCode actualStatusCode = await _client.SavePaymentDates(csv, fundingStreamId, fundingPeriodId);
+
+            actualStatusCode
+                .Should()
+                .Be(expectedStatusCode);
+
+            AndTheRequestContentsShouldHaveBeen(csv);
+        }
+
+        [TestMethod]
+        public async Task GetPaymentDates()
+        {
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+
+            await AssertGetRequest($"fundingstreams/{fundingStreamId}/fundingperiods/{fundingPeriodId}/paymentdates",
+                new FundingStreamPaymentDates(),
+                () => _client.GetPaymentDates(fundingStreamId, fundingPeriodId));
+        }
+
+        [TestMethod]
+        public async Task GetLatestProfileTotalsGetsProfileTotals()
+        {
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+            string providerId = NewRandomString();
+
+            string expectedUri = $"publishedproviders/{fundingStreamId}/{fundingPeriodId}/{providerId}/profileTotals";
+
+            IEnumerable<ProfileTotal> expectedTotals = new[]
+            {
+                new ProfileTotal(),
+            };
+
+            GivenTheResponse(expectedUri, expectedTotals, HttpMethod.Get);
+
+            ApiResponse<IEnumerable<ProfileTotal>> response = await _client.GetLatestProfileTotals(fundingStreamId,
+                fundingPeriodId,
+                providerId);
+
+            response?.Content
+                .Should()
+                .BeEquivalentTo(expectedTotals);
+        }
+
+        [TestMethod]
+        public async Task GetAllReleasedProfileTotalsGetsAllReleasedProfileTotals()
+        {
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+            string providerId = NewRandomString();
+
+            string expectedUri = $"publishedproviders/{fundingStreamId}/{fundingPeriodId}/{providerId}/allProfileTotals";
+
+            PublishedProviderVersion publishedProviderVersion = new PublishedProviderVersion { Version = 1, Date = DateTimeOffset.MinValue };
+
+            IEnumerable<ProfileTotal> expectedTotals = new[]
+            {
+                new ProfileTotal(),
+            };
+
+            IDictionary<int, ProfilingVersion> expectedProfiling = new Dictionary<int, ProfilingVersion>(new[] { new KeyValuePair<int,
+                ProfilingVersion>(publishedProviderVersion.Version,
+                new ProfilingVersion { Date = publishedProviderVersion.Date,
+                    Version = publishedProviderVersion.Version,
+                    ProfileTotals = expectedTotals }) });
+
+            GivenTheResponse(expectedUri, expectedProfiling, HttpMethod.Get);
+
+            ApiResponse<IDictionary<int, ProfilingVersion>> response = await _client.GetAllReleasedProfileTotals(fundingStreamId,
+                fundingPeriodId,
+                providerId);
+
+            response?.Content
+                .Should()
+                .BeEquivalentTo(expectedProfiling);
+
+            AndTheUrisShouldHaveBeenRequested(expectedUri);
+        }
+
+        [TestMethod]
+        [DataRow(HttpStatusCode.OK)]
+        [DataRow(HttpStatusCode.Unauthorized)]
+        [DataRow(HttpStatusCode.InsufficientStorage)]
+        public async Task RefreshFundingForSpecificationPostsToPublishingService(HttpStatusCode expectedStatusCode)
+        {
+            string specificationId = NewRandomString();
+            string expectedUri = $"specifications/{specificationId}/refresh";
+
+            GivenTheStatusCode(expectedUri, expectedStatusCode, HttpMethod.Post);
+
+            ValidatedApiResponse<JobCreationResponse> response = await _client.RefreshFundingForSpecification(specificationId);
+
+            response
+                .Should()
+                .NotBeNull();
+
+            response
+                .StatusCode
+                .Should()
+                .Be(expectedStatusCode);
+        }
+
+        [TestMethod]
+        [DataRow(HttpStatusCode.OK)]
+        [DataRow(HttpStatusCode.BadGateway)]
+        [DataRow(HttpStatusCode.InternalServerError)]
+        public async Task ApproveFundingForSpecificationPostsToPublishingService(HttpStatusCode expectedStatusCode)
+        {
+            string specificationId = NewRandomString();
+            string expectedUri = $"specifications/{specificationId}/approve";
+
+            GivenTheStatusCode(expectedUri, expectedStatusCode, HttpMethod.Post);
+
+            ValidatedApiResponse<JobCreationResponse> response = await _client.ApproveFundingForSpecification(specificationId);
+
+            response
+                 .Should()
+                 .NotBeNull();
+
+            response
+                .StatusCode
+                .Should()
+                .Be(expectedStatusCode);
+        }
+
+        [TestMethod]
+        public async Task GetCurrentPublishedProviderVersion()
+        {
+            string fundingStreamId = NewRandomString();
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+
+            await AssertGetRequest($"specifications/{specificationId}/publishedproviderversions/{providerId}/fundingStreams/{fundingStreamId}",
+                new PublishedProviderVersion(),
+                () => _client.GetCurrentPublishedProviderVersion(specificationId, fundingStreamId, providerId));
+        }
+
+        [TestMethod]
+        public async Task GetPublishedProviderVersion()
+        {
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+            string providerId = NewRandomString();
+            string version = NewRandomString();
+
+            await AssertGetRequest($"publishedproviderversions/{fundingStreamId}/{fundingPeriodId}/{providerId}/{version}",
+                new PublishedProviderVersion(),
+                () => _client.GetPublishedProviderVersion(fundingStreamId, fundingPeriodId, providerId, version));
+        }
+
+        [TestMethod]
+        public async Task GetReleasedPublishedProviderTransactions()
+        {
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+
+            await AssertGetRequest($"specifications/{specificationId}/provider/{providerId}/publishedprovidertransactions",
+                Enumerable.Empty<ReleasePublishedProviderTransaction>(),
+                () => _client.GetReleasedPublishedProviderTransactions(specificationId, providerId));
+        }
+
+        [TestMethod]
+        public async Task GetPublishedProviderTransactions()
+        {
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+
+            await AssertGetRequest($"publishedprovidertransactions/{specificationId}/{providerId}",
+                Enumerable.Empty<PublishedProviderTransaction>(),
+                () => _client.GetPublishedProviderTransactions(specificationId, providerId));
+        }
+
+        [TestMethod]
+        public async Task GetPublishedProviderVersionBody()
+        {
+            string id = NewRandomString();
+
+            await AssertGetRequest($"publishedproviderversion/{id}/body",
+                id,
+                NewRandomString(),
+                _client.GetPublishedProviderVersionBody);
+        }
+
+        [TestMethod]
+        public async Task CanChooseForFunding()
+        {
+            string id = NewRandomString();
+
+            await AssertGetRequest($"specifications/{id}/funding/canChoose",
+                id,
+                new SpecificationCheckChooseForFundingResult(),
+                _client.CanChooseForFunding);
+        }
+
+        [TestMethod]
+        public async Task SearchPublishedProvider()
+        {
+            await AssertPostRequest("publishedprovider/publishedprovider-search",
+                new SearchModel(),
+                new SearchResults<PublishedProviderSearchItem>(),
+                _client.SearchPublishedProvider);
+        }
+
+        [TestMethod]
+        public async Task GetFundingValue()
+        {
+            await AssertPostRequest("publishedprovider/fundingvalue-search",
+                new SearchModel(),
+                0,
+                _client.GetFundingValue);
+        }
+
+        [TestMethod]
+        public async Task SearchPublishedProviderIds()
+        {
+            IEnumerable<string> result = new List<string>();
+
+            await AssertPostRequest("publishedprovider/publishedprovider-id-search",
+                new PublishedProviderIdSearchModel(),
+                result,
+                _client.SearchPublishedProviderIds);
+        }
+
+        [TestMethod]
+        public async Task ValidateSpecificationForRefresh_ReturnsOK()
+        {
+            string specificationId = NewRandomString();
+
+            IEnumerable<string> expectedErrors = new List<string> { "Error1" };
+            string expectedUri = $"specifications/{specificationId}/validate-specification-for-refresh";
+
+            GivenTheResponse(expectedUri, expectedErrors, HttpMethod.Post);
+
+            ValidatedApiResponse<IEnumerable<string>> response = await _client.ValidateSpecificationForRefresh(specificationId);
+
+            response?.Content
+                .Should()
+                .BeEquivalentTo(expectedErrors);
+
+            AndTheUrisShouldHaveBeenRequested(expectedUri);
+        }
+
+        [TestMethod]
+        public async Task RefreshFundingForSpecification()
+        {
+            string id = NewRandomString();
+
+            await AssertPostRequest($"specifications/{id}/refresh",
+                id,
+                new JobCreationResponse(),
+                _client.RefreshFundingForSpecification);
+        }
+
+        [TestMethod]
+        public async Task ApproveFundingForSpecification()
+        {
+            string id = NewRandomString();
+
+            await AssertPostRequest($"specifications/{id}/approve",
+                id,
+                new JobCreationResponse(),
+                _client.ApproveFundingForSpecification);
+        }
+
+        [TestMethod]
+        public async Task ApproveFundingForBatchProviders()
+        {
+            string id = NewRandomString();
+            PublishedProviderIdsRequest approveProvidersRequest = new PublishedProviderIdsRequest();
+
+            await AssertPostRequest($"specifications/{id}/approve-providers",
+                approveProvidersRequest,
+                new JobCreationResponse(),
+                () => _client.ApproveFundingForBatchProviders(id, approveProvidersRequest));
+        }
+
+        [TestMethod]
+        public async Task PublishFundingForSpecification()
+        {
+            string id = NewRandomString();
+
+            await AssertPostRequest($"specifications/{id}/publish",
+                id,
+                new JobCreationResponse(),
+                _client.PublishFundingForSpecification);
+        }
+
+        [TestMethod]
+        public async Task PublishFundingForBatchProviders()
+        {
+            string id = NewRandomString();
+            PublishedProviderIdsRequest publishProvidersRequest = new PublishedProviderIdsRequest();
+
+            await AssertPostRequest($"specifications/{id}/publish-providers",
+                publishProvidersRequest,
+                new JobCreationResponse(),
+                () => _client.PublishFundingForBatchProviders(id, publishProvidersRequest));
+        }
+
+        [TestMethod]
+        public async Task GetProviderStatusCountsForNullIsIndicativeFlag()
+        {
+            string specificationId = NewRandomString();
+            string providerType = NewRandomString();
+            string localAuthority = NewRandomString();
+            string status = NewRandomString();
+            string[] statuses = new string[] { status };
+
+            await AssertGetRequest(
+                $"specifications/{specificationId}/publishedproviders/publishingstatus?providerType={providerType}&localAuthority={localAuthority}&statuses={status}&monthYearOpened=",
+                Enumerable.Empty<ProviderFundingStreamStatusResponse>(),
+                () => _client.GetProviderStatusCounts(specificationId, providerType, localAuthority, statuses));
+        }
+
+        [TestMethod]
+        public async Task GetProviderStatusCountsForIsIndicativeFlagWithValue()
+        {
+            string specificationId = NewRandomString();
+            string providerType = NewRandomString();
+            string localAuthority = NewRandomString();
+            string status = NewRandomString();
+            string[] statuses = new string[] { status };
+            bool? isIndicative = NewRandomBoolean();
+            string monthYearOpened = NewRandomString();
+
+            await AssertGetRequest(
+                $"specifications/{specificationId}/publishedproviders/publishingstatus?providerType={providerType}&localAuthority={localAuthority}&statuses={status}&monthYearOpened={monthYearOpened}&isIndicative={isIndicative.Value}",
+                Enumerable.Empty<ProviderFundingStreamStatusResponse>(),
+                () => _client.GetProviderStatusCounts(specificationId, providerType, localAuthority, statuses, isIndicative, monthYearOpened));
+        }
+
+        [TestMethod]
+        public async Task SearchPublishedProviderLocalAuthorities()
+        {
+            string searchText = NewRandomString();
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+
+            await AssertGetRequest($"publishedproviders/{fundingStreamId}/{fundingPeriodId}/localauthorities?searchText={searchText}",
+                Enumerable.Repeat(NewRandomString(), 5),
+                () => _client.SearchPublishedProviderLocalAuthorities(searchText, fundingStreamId, fundingPeriodId));
+        }
+
+        [TestMethod]
+        public async Task AssignProfilePatternKeyToPublishedProvider()
+        {
+            string fundingStreamId = NewRandomString();
+            string fundingPeriodId = NewRandomString();
+            string providerId = NewRandomString();
+            ProfilePatternKey profilePatternKey = new ProfilePatternKey { FundingLineCode = NewRandomString(), Key = NewRandomString() };
+            string expectedUri = $"publishedprovider/fundingStream/{fundingStreamId}/fundingPeriod/{fundingPeriodId}/provider/{providerId}";
+
+            GivenTheStatusCode(expectedUri, HttpStatusCode.OK, HttpMethod.Post);
+
+            HttpStatusCode response = await _client.AssignProfilePatternKeyToPublishedProvider(fundingStreamId, fundingPeriodId, providerId, profilePatternKey);
+
+            response
+                .Should()
+                .NotBeNull();
+
+            response
+                .Should()
+                .Be(HttpStatusCode.OK);
+        }
+
+        [TestMethod]
+        [DataRow(HttpStatusCode.OK)]
+        [DataRow(HttpStatusCode.BadGateway)]
+        [DataRow(HttpStatusCode.InternalServerError)]
+        public async Task ApplyCustomProfilePattern(HttpStatusCode expectedStatusCode)
+        {
+            GivenTheStatusCode("publishedproviders/customprofiles", expectedStatusCode, HttpMethod.Post);
+
+            ApplyCustomProfileRequest request = new ApplyCustomProfileRequest
+            {
+                ProviderId = NewRandomString(),
+                CustomProfileName = NewRandomString(),
+                FundingPeriodId = NewRandomString(),
+                FundingStreamId = NewRandomString(),
+                FundingLineCode = NewRandomString()
+            };
+
+            NoValidatedContentApiResponse response = await _client.ApplyCustomProfilePattern(request);
+
+            response
+                .Should()
+                .NotBeNull();
+
+            response
+                .StatusCode
+                .Should()
+                .Be(expectedStatusCode);
+
+            AndTheRequestContentsShouldHaveBeen(request.AsJson());
+        }
+
+        [TestMethod]
+        public async Task GetProviderBatchForApprovalCount()
+        {
+            string specificationId = NewRandomString();
+
+            PublishedProviderIdsRequest publishProvidersRequest = new PublishedProviderIdsRequest();
+
+            await AssertPostRequest($"specifications/{specificationId}/publishedproviders/publishingstatus-for-approval",
+                publishProvidersRequest,
+                new PublishedProviderFundingCount
+                {
+                    Count = NewRandomInt(),
+                    PaidProviderCount = NewRandomInt(),
+                    IndicativeProviderCount = NewRandomInt(),
+                    TotalFunding = NewRandomInt(),
+                    PaidProvidersTotalFunding = NewRandomInt(),
+                    IndicativeProviderTotalFunding = NewRandomInt()
+                },
+                () => _client.GetProviderBatchForApprovalCount(publishProvidersRequest, specificationId));
+        }
+
+        [TestMethod]
+        public async Task GetProviderBatchForReprofilingSummary()
+        {
+            string specificationId = NewRandomString();
+
+            PublishedProviderIdsRequest publishProvidersRequest = new PublishedProviderIdsRequest();
+
+            await AssertPostRequest($"specifications/{specificationId}/reprofiling/providerstatus-for-reprofilingondemand",
+                publishProvidersRequest,
+                new ReprofilingSummaryResult
+                {
+                    TotalProviders = NewRandomInt(),
+                    TotalEligibleProviders = NewRandomInt(),
+                    Url = NewRandomString(),
+                    ProviderSummaryResult = new List<ProviderSummaryResult>()
+                    {
+                        new ProviderSummaryResult()
+                        {
+                            UKPRN = NewRandomString(),
+                            ErrorMessage = NewRandomString(),
+                            IsEligible = NewRandomBoolean(),
+                        }
+                    }
+                },
+                () => _client.GetProviderBatchForReprofilingSummary(publishProvidersRequest, specificationId));
+        }
+
+        [TestMethod]
+        public async Task GetProviderBatchForReleaseCount()
+        {
+            string specificationId = NewRandomString();
+
+            PublishedProviderIdsRequest publishProvidersRequest = new PublishedProviderIdsRequest();
+
+            await AssertPostRequest($"specifications/{specificationId}/publishedproviders/publishingstatus-for-release",
+                publishProvidersRequest,
+                new PublishedProviderFundingCount
+                {
+                    Count = NewRandomInt(),
+                    PaidProviderCount = NewRandomInt(),
+                    IndicativeProviderCount = NewRandomInt(),
+                    TotalFunding = NewRandomInt(),
+                    PaidProvidersTotalFunding = NewRandomInt(),
+                    IndicativeProviderTotalFunding = NewRandomInt()
+                },
+                () => _client.GetProviderBatchForReleaseCount(publishProvidersRequest, specificationId));
+        }
+
+        [TestMethod]
+        public async Task GetPublishedProviderErrors()
+        {
+            string specificationId = NewRandomString();
+
+            await AssertGetRequest($"publishedprovidererrors/{specificationId}",
+                Enumerable.Repeat(NewRandomString(), 5),
+                () => _client.GetPublishedProviderErrors(specificationId));
+        }
+
+        [TestMethod]
+        public async Task GetFundingLinePublishedProviderDetails()
+        {
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+            string fundingStreamId = NewRandomString();
+            string fundingLineId = NewRandomString();
+
+            await AssertGetRequest($"publishedproviderfundinglinedetails/{specificationId}/{providerId}/{fundingStreamId}/{fundingLineId}",
+                new FundingLineProfile(),
+                () => _client.GetFundingLinePublishedProviderDetails(specificationId, providerId, fundingStreamId, fundingLineId));
+        }
+
+        [TestMethod]
+        public async Task PreviousProfileExistsForSpecificationForProviderForFundingLine()
+        {
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+            string fundingStreamId = NewRandomString();
+            string fundingLineCode = NewRandomString();
+
+            bool expectedResponse = NewRandomBoolean();
+
+            GivenThePrimitiveResponse(
+                $"publishedproviderfundinglinedetails/{specificationId}/{providerId}/{fundingStreamId}/{fundingLineCode}/change-exists",
+                expectedResponse, HttpMethod.Get);
+
+            ApiResponse<bool> apiResponse = await _client.PreviousProfileExistsForSpecificationForProviderForFundingLine(
+                    specificationId,
+                    providerId,
+                    fundingStreamId,
+                    fundingLineCode);
+
+            apiResponse
+                ?.Content
+                .Should()
+                .Be(expectedResponse);
+        }
+
+        [TestMethod]
+        public async Task GetPreviousProfilesForSpecificationForProviderForFundingLine()
+        {
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+            string fundingStreamId = NewRandomString();
+            string fundingLineCode = NewRandomString();
+
+            await AssertGetRequest(
+                $"publishedproviderfundinglinedetails/{specificationId}/{providerId}/{fundingStreamId}/{fundingLineCode}/changes",
+                Enumerable.Empty<FundingLineChange>(),
+                () => _client.GetPreviousProfilesForSpecificationForProviderForFundingLine(
+                    specificationId,
+                    providerId,
+                    fundingStreamId,
+                    fundingLineCode));
+        }
+
+        [TestMethod]
+        public async Task GetCurrentProfileConfig()
+        {
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+            string fundingStreamId = NewRandomString();
+
+            await AssertGetRequest(
+                $"publishedproviderfundinglinedetails/{specificationId}/{providerId}/{fundingStreamId}",
+                Enumerable.Empty<FundingLineProfile>(),
+                () => _client.GetCurrentProfileConfig(
+                    specificationId,
+                    providerId,
+                    fundingStreamId));
+        }
+
+        [TestMethod]
+        public async Task GetCurrentPublishedProviderFundingStructure()
+        {
+            string fundingStreamId = NewRandomString();
+            string specificationId = NewRandomString();
+            string providerId = NewRandomString();
+
+            await AssertGetRequest(
+                $"specifications/{specificationId}/publishedproviders/{providerId}/fundingStreams/{fundingStreamId}/fundingStructure",
+                new PublishedProviderFundingStructure(),
+                () => _client.GetCurrentPublishedProviderFundingStructure(specificationId, fundingStreamId, providerId));
+        }
+
+        [TestMethod]
+        public async Task GetPublishedProviderFundingStructure()
+        {
+            string publishedProviderVersionId = NewRandomString();
+
+            await AssertGetRequest(
+                $"publishedproviderfundingstructure/{publishedProviderVersionId}",
+                new PublishedProviderFundingStructure(),
+                () => _client.GetPublishedProviderFundingStructure(
+                    publishedProviderVersionId));
+        }
+
+        [TestMethod]
+        public async Task PreviewProfileChange()
+        {
+            ProfilePreviewRequest publishProvidersRequest = new ProfilePreviewRequest();
+
+            await AssertPostRequest("publishedproviderfundinglinepreview",
+                publishProvidersRequest,
+               new[]
+               {
+                   NewRandomProfileTotal(),
+                   NewRandomProfileTotal(),
+                   NewRandomProfileTotal(),
+                   NewRandomProfileTotal(),
+                   NewRandomProfileTotal()
+               }.AsEnumerable(),
+                () => _client.PreviewProfileChange(publishProvidersRequest));
+        }
+
+        [TestMethod]
+        public async Task QueueSpecificationFundingStreamSqlImport()
+        {
+            string specificationId = NewRandomString();
+            string fundingStreamId = NewRandomString();
+
+            await AssertGetRequest($"sqlqa/specifications/{specificationId}/funding-streams/{fundingStreamId}/import/queue",
+                new JobCreationResponse(),
+                () => _client.QueueSpecificationFundingStreamSqlImport(specificationId, fundingStreamId));
+        }
+
+        [TestMethod]
+        public async Task QueueSpecificationFundingStreamReleasedSqlImport()
+        {
+            string specificationId = NewRandomString();
+            string fundingStreamId = NewRandomString();
+
+            await AssertGetRequest($"sqlqa/specifications/{specificationId}/funding-streams/{fundingStreamId}/released/import/queue",
+                new JobCreationResponse(),
+                () => _client.QueueSpecificationFundingStreamReleasedSqlImport(specificationId, fundingStreamId));
+        }
+
+        [TestMethod]
+        public async Task GetLatestPublishedDate()
+        {
+            string fundingPeriodId = NewRandomString();
+            string fundingStreamId = NewRandomString();
+
+            await AssertGetRequest($"publishedproviders/{fundingStreamId}/{fundingPeriodId}/lastupdated",
+                new LatestPublishedDate(),
+                () => _client.GetLatestPublishedDate(fundingStreamId, fundingPeriodId));
+        }
+
+        [TestMethod]
+        public async Task GenerateCsvForBatchPublishedProvidersForRelease()
+        {
+            PublishedProviderIdsRequest publishedProviderIdsRequest = new PublishedProviderIdsRequest();
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest(
+                $"specifications/{specificationId}/publishedproviders/generate-csv-for-release/batch",
+                publishedProviderIdsRequest,
+                new PublishedProviderDataDownload
+                {
+                    Url = NewRandomString()
+                },
+                () => _client.GenerateCsvForBatchPublishedProvidersForRelease(publishedProviderIdsRequest, specificationId));
+        }
+
+        [TestMethod]
+        public async Task GenerateCsvForBatchPublishedProvidersForApproval()
+        {
+            PublishedProviderIdsRequest publishedProviderIdsRequest = new PublishedProviderIdsRequest();
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest(
+                $"specifications/{specificationId}/publishedproviders/generate-csv-for-approval/batch",
+                publishedProviderIdsRequest,
+                new PublishedProviderDataDownload
+                {
+                    Url = NewRandomString()
+                },
+                () => _client.GenerateCsvForBatchPublishedProvidersForApproval(publishedProviderIdsRequest, specificationId));
+        }
+
+        [TestMethod]
+        public async Task GenerateCsvForAllPublishedProvidersForRelease()
+        {
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest(
+                $"specifications/{specificationId}/publishedproviders/generate-csv-for-release/all",
+                string.Empty,
+                new PublishedProviderDataDownload
+                {
+                    Url = NewRandomString()
+                },
+                () => _client.GenerateCsvForAllPublishedProvidersForRelease(specificationId));
+        }
+
+        [TestMethod]
+        public async Task GenerateCsvForAllPublishedProvidersForApproval()
+        {
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest(
+                $"specifications/{specificationId}/publishedproviders/generate-csv-for-approval/all",
+                string.Empty,
+                new PublishedProviderDataDownload
+                {
+                    Url = NewRandomString()
+                },
+                () => _client.GenerateCsvForAllPublishedProvidersForApproval(specificationId));
+        }
+
+        [TestMethod]
+        public async Task UploadBatch()
+        {
+            BatchUploadRequest batchUploadRequest = new BatchUploadRequest();
+
+            await AssertPostRequest("publishedproviderbatch",
+                batchUploadRequest,
+                new BatchUploadResponse
+                {
+                    BatchId = NewRandomString(),
+                    Url = NewRandomString()
+                },
+                () => _client.UploadBatch(batchUploadRequest));
+        }
+
+        [TestMethod]
+        public async Task QueueBatchUploadValidation()
+        {
+            BatchUploadValidationRequest uploadValidationRequest = new BatchUploadValidationRequest();
+
+            await AssertPostRequest("publishedproviderbatch/validate",
+                uploadValidationRequest,
+                new JobCreationResponse
+                {
+                    JobId = NewRandomString()
+                },
+                () => _client.QueueBatchUploadValidation(uploadValidationRequest));
+        }
+
+        [TestMethod]
+        public async Task GetBatchPublishedProviderIds()
+        {
+            string batchId = NewRandomString();
+
+            await AssertGetRequest($"publishedproviderbatch/{batchId}/publishedProviders",
+                batchId,
+                new[]
+                {
+                    NewRandomString(),
+                    NewRandomString(),
+                    NewRandomString(),
+                    NewRandomString(),
+                }.AsEnumerable(),
+                _client.GetBatchPublishedProviderIds);
+        }
+
+        [TestMethod]
+        public async Task GetAvailableFundingLineProfilePeriodsForVariationPointers()
+        {
+            string specificationId = NewRandomString();
+            IEnumerable<AvailableVariationPointerFundingLine> availableVariationPointerFundingLines = new List<AvailableVariationPointerFundingLine>();
+
+            await AssertGetRequest($"specifications/{specificationId}/availablePeriodsForVariationPointers",
+                specificationId,
+                availableVariationPointerFundingLines,
+                _client.GetAvailableFundingLineProfilePeriodsForVariationPointers);
+        }
+
+        [TestMethod]
+        public async Task QueueReleaseProviderVersions()
+        {
+            ReleaseProvidersToChannelRequest releaseProvidersToChannelRequest = new ReleaseProvidersToChannelRequest();
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest($"specifications/{specificationId}/release-providers",
+                releaseProvidersToChannelRequest,
+                new JobCreationResponse
+                {
+                },
+                () => _client.QueueReleaseProviderVersions(specificationId, releaseProvidersToChannelRequest));
+        }
+
+        [TestMethod]
+        public async Task QueueRelease()
+        {
+            ReleaseProvidersToChannelRequest releaseProvidersToChannelRequest = new ReleaseProvidersToChannelRequest();
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest($"specifications/{specificationId}/release",
+                releaseProvidersToChannelRequest,
+                new JobCreationResponse
+                {
+                },
+                () => _client.QueueRelease(specificationId, releaseProvidersToChannelRequest));
+        }
+
+        [TestMethod]
+        public async Task GetApprovedPublishedProvidersReleaseFundingSummary()
+        {
+            ReleaseFundingPublishProvidersRequest request = new ReleaseFundingPublishProvidersRequest();
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest($"specifications/{specificationId}/publishedproviders/release-funding-summary",
+                request,
+                new ReleaseFundingPublishedProvidersSummary
+                {
+                },
+                () => _client.GetApprovedPublishedProvidersReleaseFundingSummary(specificationId, request));
+        }
+
+        [TestMethod]
+        public async Task QueueReleaseManagementDataMigrationJob()
+        {
+            string fundingStreamId = NewRandomString();
+
+            await AssertGetRequest($"releasemanagement/queuereleasemanagementdatamigrationjob?fundingStreamIds={fundingStreamId}",
+                new JobCreationResponse(),
+                () => _client.QueueReleaseManagementDataMigrationJob(fundingStreamId));
+        }
+
+        [TestMethod]
+        public async Task PopulateReferenceData()
+        {
+            string fundingStreamId = NewRandomString();
+
+            await AssertGetRequest($"releasemanagement/populatereferencedata?fundingStreamIds={fundingStreamId}",
+                HttpStatusCode.OK,
+                () =>_client.PopulateReferenceData(fundingStreamId));
+        }
+
+        [TestMethod]
+        public async Task GetAllChannels()
+        {
+            IEnumerable<Channel> channels = new List<Channel>();
+
+            await AssertGetRequest("releasemanagement/channels",
+                channels,
+                _client.GetAllChannels);
+        }
+
+        [TestMethod]
+        [DataRow(HttpStatusCode.OK)]
+        [DataRow(HttpStatusCode.BadRequest)]
+        [DataRow(HttpStatusCode.InternalServerError)]
+        public async Task UpsertChannel(HttpStatusCode expectedStatusCode)
+        {
+            ChannelRequest request = new ChannelRequest
+            {
+                ChannelCode = "ABC",
+                ChannelName = "ABC",
+                UrlKey = "abc"
+            };
+
+            string expectedUri = "releasemanagement/channels";
+
+            GivenTheStatusCode(expectedUri, expectedStatusCode, HttpMethod.Post);
+
+            ValidatedApiResponse<Channel> response = await _client.UpsertChannel(request);
+
+            response
+                .Should()
+                .NotBeNull();
+
+            response
+                .StatusCode
+                .Should()
+                .Be(expectedStatusCode);
+        }
+
+        private ProfileTotal NewRandomProfileTotal() => new ProfileTotal
+        {
+            Value = new RandomNumberBetween(999, int.MaxValue)
+        };
+
+        [TestMethod]
+        public async Task CheckAndGetApprovedProviderIds()
+        {
+            IEnumerable<string> providerIds = NewEnumerable(NewRandomString(), NewRandomString());
+            IEnumerable<string> ApprovedproviderIds = NewEnumerable(NewRandomString(), NewRandomString());
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest($"publishedprovider/approvedproviderids/{specificationId}",
+                 providerIds,
+                 ApprovedproviderIds,
+                () => _client.CheckAndGetApprovedProviderIds(providerIds, specificationId));
+        }
+
+        [TestMethod]
+        public async Task ReProfilingOnDemand()
+        {
+            PublishedProviderIdsRequest publishedProviderIdsRequest = new PublishedProviderIdsRequest();
+            string specificationId = NewRandomString();
+
+            await AssertPostRequest($"specifications/{specificationId}/reprofilingondemand",
+                publishedProviderIdsRequest,
+                new JobCreationResponse
+                {
+                },
+                () => _client.ReProfilingOnDemand(specificationId, publishedProviderIdsRequest));
+        }
+    }
+}
